@@ -1,0 +1,2457 @@
+{-# LANGUAGE NoMonomorphismRestriction, DeriveDataTypeable, RankNTypes, GADTs, TupleSections  #-}
+
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.Backends.Annot
+-- Copyright   :  (c) Ranjit Jhala
+-- License     :  BSD-like
+--
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
+--
+-- Write out HsColour compatible type annotations
+-----------------------------------------------------------------------------
+
+module Haddock.Backends.Annot ( 
+    ppAnnot
+  ) where
+
+import GHC              
+import GHC.Exts         (groupWith)
+import Outputable
+import Var              (isId)
+import Id               (idName, isDictId)
+import NameSet          (NameSet)
+import FastString       (fsLit)
+import PprTyThing 
+import System.Directory (copyFile) 
+import System.FilePath  (addExtension)
+import qualified Data.Map as M
+import qualified Data.List as L
+import Data.Maybe (isJust)
+import Data.Data
+import Data.Generics.Aliases hiding (GT)
+import Haddock.Types
+
+ppAnnot :: [Interface] -> IO ()
+ppAnnot ifaces 
+  = mapM_ render ifaces
+
+render :: Interface -> IO ()
+render iface 
+  = do putStrLn $ "Render Annot: src = " ++ srcName ++ " dest = " ++ annName 
+       copyFile srcName annName
+       appendFile annName annots
+    where srcName = ifaceOrigFilename iface
+          annName = srcName `addExtension` "annot"
+          annots  = show $ getAnnMap srcName $ ifaceTcSource iface 
+
+newtype AnnMap = Ann (M.Map Loc (String, String))                    
+newtype Loc    = Loc (Int, Int) deriving (Eq, Ord, Show)
+instance Show AnnMap where
+  show (Ann m) = "\n\n" ++ breakS ++ "\n\n" ++ (concatMap ppAnn $ M.toList m)
+    where ppAnn (Loc (l, c), (x,s)) =  x ++ "\n" 
+                                    ++ show l ++ "\n"
+                                    ++ show c ++ "\n"
+                                      ++ show (length $ lines s) ++ "\n"
+                                      ++ s ++ "\n\n\n"
+breakS :: String
+breakS = "MOUSEOVER ANNOTATIONS" 
+
+---------------------------------------------------------------------------
+-- Extract Annotations ----------------------------------------------------
+---------------------------------------------------------------------------
+
+traceShow :: (Show a) => String -> a -> a
+traceShow s x = trace ("Trace: " ++ s ++ " : " ++ show x) $ x
+
+getAnnMap ::  Data a => FilePath -> a -> AnnMap
+getAnnMap srcName tcm  = Ann $ M.fromList $ canonize $ anns
+  where anns   = [(l, (s, renderId x)) | (l, (s, x)) <- rs ++ ws ]
+        rs     = [(l, (s, x)) | (_,l,s) <- getLocEs tcm, x <- typs s]
+        ws     = [(l, (s, x)) | (s, (x, Just l)) <- ns]
+        ns     = getNames srcName tcm
+        tm     = M.fromList ns
+        typs s = case s `M.lookup` tm of 
+                   Nothing    -> []
+                   Just (x,_) -> [x]
+
+canonize :: (Ord b, Eq a) => [(b, (t, [a]))] -> [(b, (t, [a]))]
+canonize anns = map (head . L.sortBy cmp) $ groupWith fst anns
+  where cmp (_,(_,x1)) (_,(_,x2))
+          | x1 == x2              = EQ
+          | length x1 < length x2 = GT
+          | otherwise             = LT
+
+getLocEs ::  (Data a) => a -> [(HsExpr Id, Loc, String)]
+getLocEs z = [(e, spLoc l, stripParens $ showPpr e) | L l e <- findLEs z]
+  where stripParens ('(':s)  = stripParens s
+        stripParens s        = stripRParens (reverse s)
+        stripRParens (')':s) = stripRParens s
+        stripRParens s       = reverse s
+
+getNames ::  (Data a) => FilePath -> a -> [(String, (Id, Maybe Loc))]
+getNames srcName z = [(showPpr x, (x, idLoc srcName x)) | x <- findIds z, idOk x ]
+  where idOk = not . isDictId 
+
+renderId :: Id -> String
+renderId = showSDocForUser neverQualify . pprTyThing False . AnId
+
+spLoc :: SrcSpan -> Loc
+spLoc sp = Loc (srcSpanStartLine sp, srcSpanStartCol sp)
+
+idLoc :: FilePath -> Id -> Maybe Loc
+idLoc srcName x 
+  | not (isGoodSrcSpan sp) = Nothing 
+  | not (thisFile sp)      = Nothing 
+  | otherwise              = Just $ spLoc sp
+  where sp       = nameSrcSpan $ idName x
+        thisFile = (fsLit srcName ==) . srcSpanFile 
+
+---------------------------------------------------------------------------
+-- Visiting and Extracting Identifiers ------------------------------------
+-- From Tamar Christina: http://mistuke.wordpress.com/category/vsx --------
+---------------------------------------------------------------------------
+
+data Guard where 
+  Guard :: Typeable a => Maybe a -> Guard 
+  
+-- type HList = [Guard]
+
+-- | Summarise all nodes in top-down, left-to-right order 
+everythingButQ :: (r -> r -> r) -> [Guard] -> GenericQ r -> GenericQ r 
+everythingButQ k q f x 
+  = foldl k (f x) fsp 
+    where fsp = case isPost x q of 
+                  True  -> [] 
+                  False -> gmapQ (everythingButQ k q f) x
+
+isPost :: Typeable a => a -> [Guard] -> Bool 
+isPost a = or . map check 
+  where check :: Guard -> Bool 
+        check x = case x of 
+                    Guard y -> isJust $ (cast a) `asTypeOf` y
+
+-- | Get a list of all entities that meet a predicate 
+listifyBut :: Typeable r => (r -> Bool) -> [Guard] -> GenericQ [r] 
+listifyBut p q 
+  = everythingButQ (++) q ([] `mkQ` (\x -> if p x then [x] else []))
+
+skipGuards :: [Guard]
+skipGuards = [ Guard (undefined :: Maybe NameSet) 
+             , Guard (undefined :: Maybe PostTcKind)]
+
+findIds :: Data a => a -> [Id] 
+findIds a = listifyBut isId skipGuards a
+
+findLEs :: Data a => a -> [LHsExpr Id] 
+findLEs a = listifyBut (isGoodSrcSpan . getLoc) skipGuards a 
+
+
+MOUSEOVER ANNOTATIONS
+
+Haddock.Backends.Annot.ppAnnot
+38
+1
+1
+ppAnnot :: [Interface] -> IO ()
+
+
+ifaces
+38
+9
+1
+ifaces :: [Interface]
+
+
+Control.Monad.mapM_
+39
+5
+1
+mapM_ :: Monad m => (a -> m b) -> [a] -> m ()
+
+
+Haddock.Backends.Annot.render
+39
+11
+1
+render :: Interface -> IO ()
+
+
+ifaces
+39
+18
+1
+ifaces :: [Interface]
+
+
+Haddock.Backends.Annot.render
+42
+1
+1
+render :: Interface -> IO ()
+
+
+iface
+42
+8
+1
+iface :: Interface
+
+
+System.IO.putStrLn
+43
+8
+1
+putStrLn :: String -> IO ()
+
+
+GHC.Base.$
+43
+17
+1
+($) :: (a -> b) -> a -> b
+
+
+GHC.Base.++
+43
+42
+1
+(++) :: [a] -> [a] -> [a]
+
+
+srcName
+43
+45
+1
+srcName :: FilePath
+
+
+GHC.Base.++
+43
+53
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+43
+67
+1
+(++) :: [a] -> [a] -> [a]
+
+
+annName
+43
+70
+1
+annName :: FilePath
+
+
+System.Directory.copyFile
+44
+8
+1
+copyFile :: FilePath -> FilePath -> IO ()
+
+
+srcName
+44
+17
+1
+srcName :: FilePath
+
+
+annName
+44
+25
+1
+annName :: FilePath
+
+
+System.IO.appendFile
+45
+8
+1
+appendFile :: FilePath -> String -> IO ()
+
+
+annName
+45
+19
+1
+annName :: FilePath
+
+
+annots
+45
+27
+1
+annots :: String
+
+
+srcName
+46
+11
+1
+srcName :: FilePath
+
+
+Haddock.Types.ifaceOrigFilename
+46
+21
+1
+ifaceOrigFilename :: Interface -> FilePath
+
+
+iface
+46
+39
+1
+iface :: Interface
+
+
+annName
+47
+11
+1
+annName :: FilePath
+
+
+srcName
+47
+21
+1
+srcName :: FilePath
+
+
+System.FilePath.Posix.addExtension
+47
+29
+1
+addExtension :: FilePath -> String -> FilePath
+
+
+annots
+48
+11
+1
+annots :: String
+
+
+GHC.Show.show
+48
+21
+1
+show :: Show a => a -> String
+
+
+GHC.Base.$
+48
+26
+1
+($) :: (a -> b) -> a -> b
+
+
+Haddock.Backends.Annot.getAnnMap
+48
+28
+1
+getAnnMap :: Data a => FilePath -> a -> AnnMap
+
+
+srcName
+48
+38
+1
+srcName :: FilePath
+
+
+GHC.Base.$
+48
+46
+1
+($) :: (a -> b) -> a -> b
+
+
+Haddock.Types.ifaceTcSource
+48
+48
+1
+ifaceTcSource :: Interface -> TypecheckedSource
+
+
+iface
+48
+62
+1
+iface :: Interface
+
+
+Haddock.Backends.Annot.Ann
+50
+18
+1
+Ann :: Map Loc (String, String) -> AnnMap
+
+
+Haddock.Backends.Annot.Loc
+51
+18
+1
+Loc :: (Int, Int) -> Loc
+
+
+GHC.Classes.D:Eq
+51
+43
+1
+D:Eq :: (a -> a -> Bool) -> (a -> a -> Bool) -> T:Eq a
+
+
+GHC.Classes.D:Ord
+51
+47
+10
+D:Ord ::
+  Eq a =>
+  (a -> a -> Ordering)
+  -> (a -> a -> Bool)
+  -> (a -> a -> Bool)
+  -> (a -> a -> Bool)
+  -> (a -> a -> Bool)
+  -> (a -> a -> a)
+  -> (a -> a -> a)
+  -> T:Ord a
+
+
+GHC.Show.D:Show
+51
+52
+2
+D:Show ::
+  (Int -> a -> ShowS) -> (a -> String) -> ([a] -> ShowS) -> T:Show a
+
+
+GHC.Show.D:Show
+52
+10
+2
+D:Show ::
+  (Int -> a -> ShowS) -> (a -> String) -> ([a] -> ShowS) -> T:Show a
+
+
+m
+53
+13
+1
+m :: Map Loc (String, String)
+
+
+GHC.Base.++
+53
+25
+1
+(++) :: [a] -> [a] -> [a]
+
+
+Haddock.Backends.Annot.breakS
+53
+28
+1
+breakS :: String
+
+
+GHC.Base.++
+53
+35
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+53
+45
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.List.concatMap
+53
+49
+1
+concatMap :: (a -> [b]) -> [a] -> [b]
+
+
+ppAnn
+53
+59
+1
+ppAnn :: (Loc, ([Char], String)) -> [Char]
+
+
+GHC.Base.$
+53
+65
+1
+($) :: (a -> b) -> a -> b
+
+
+Data.Map.toList
+53
+67
+1
+toList :: Map k a -> [(k, a)]
+
+
+m
+53
+76
+1
+m :: Map Loc (String, String)
+
+
+ppAnn
+54
+11
+1
+ppAnn :: (Loc, ([Char], String)) -> [Char]
+
+
+l
+54
+23
+1
+l :: Int
+
+
+c
+54
+26
+1
+c :: Int
+
+
+x
+54
+31
+1
+x :: [Char]
+
+
+s
+54
+33
+1
+s :: String
+
+
+x
+54
+40
+1
+x :: [Char]
+
+
+GHC.Base.++
+54
+42
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+55
+37
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Show.show
+55
+40
+1
+show :: Show a => a -> String
+
+
+l
+55
+45
+1
+l :: Int
+
+
+GHC.Base.++
+55
+47
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+56
+37
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Show.show
+56
+40
+1
+show :: Show a => a -> String
+
+
+c
+56
+45
+1
+c :: Int
+
+
+GHC.Base.++
+56
+47
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+57
+39
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Show.show
+57
+42
+1
+show :: Show a => a -> String
+
+
+GHC.List.length
+57
+48
+1
+length :: [a] -> Int
+
+
+GHC.Base.$
+57
+55
+1
+($) :: (a -> b) -> a -> b
+
+
+Data.List.lines
+57
+57
+1
+lines :: String -> [String]
+
+
+s
+57
+63
+1
+s :: String
+
+
+GHC.Base.++
+57
+66
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+58
+39
+1
+(++) :: [a] -> [a] -> [a]
+
+
+s
+58
+42
+1
+s :: String
+
+
+GHC.Base.++
+58
+44
+1
+(++) :: [a] -> [a] -> [a]
+
+
+Haddock.Backends.Annot.breakS
+60
+1
+1
+breakS :: String
+
+
+Haddock.Backends.Annot.traceShow
+67
+1
+1
+traceShow :: Show a => String -> a -> a
+
+
+s
+67
+11
+1
+s :: String
+
+
+x
+67
+13
+1
+x :: a
+
+
+Debug.Trace.trace
+67
+17
+1
+trace :: String -> a -> a
+
+
+GHC.Base.++
+67
+34
+1
+(++) :: [a] -> [a] -> [a]
+
+
+s
+67
+37
+1
+s :: String
+
+
+GHC.Base.++
+67
+39
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Base.++
+67
+48
+1
+(++) :: [a] -> [a] -> [a]
+
+
+GHC.Show.show
+67
+51
+1
+show :: Show a => a -> String
+
+
+x
+67
+56
+1
+x :: [Char]
+
+
+GHC.Base.$
+67
+59
+1
+($) :: (a -> b) -> a -> b
+
+
+x
+67
+61
+1
+x :: [Char]
+
+
+Haddock.Backends.Annot.getAnnMap
+70
+1
+1
+getAnnMap :: Data a => FilePath -> a -> AnnMap
+
+
+srcName
+70
+11
+1
+srcName :: FilePath
+
+
+tcm
+70
+19
+1
+tcm :: a
+
+
+Haddock.Backends.Annot.Ann
+70
+26
+1
+Ann :: Map Loc (String, String) -> AnnMap
+
+
+GHC.Base.$
+70
+30
+1
+($) :: (a -> b) -> a -> b
+
+
+Data.Map.fromList
+70
+32
+1
+fromList :: Ord k => [(k, a)] -> Map k a
+
+
+GHC.Base.$
+70
+43
+1
+($) :: (a -> b) -> a -> b
+
+
+Haddock.Backends.Annot.canonize
+70
+45
+1
+canonize :: (Ord b, Eq a) => [(b, (t, [a]))] -> [(b, (t, [a]))]
+
+
+GHC.Base.$
+70
+54
+1
+($) :: (a -> b) -> a -> b
+
+
+anns
+70
+56
+1
+anns :: [(Loc, (String, String))]
+
+
+anns
+71
+9
+1
+anns :: [(Loc, (String, String))]
+
+
+l
+71
+20
+1
+l :: Int
+
+
+s
+71
+24
+1
+s :: String
+
+
+Haddock.Backends.Annot.renderId
+71
+27
+1
+renderId :: Id -> String
+
+
+x
+71
+36
+1
+x :: [Char]
+
+
+l
+71
+43
+1
+l :: Loc
+
+
+s
+71
+47
+1
+s :: String
+
+
+x
+71
+50
+1
+x :: Id
+
+
+rs
+71
+57
+1
+rs :: [(Loc, (String, Id))]
+
+
+GHC.Base.++
+71
+60
+1
+(++) :: [a] -> [a] -> [a]
+
+
+ws
+71
+63
+1
+ws :: [(Loc, (String, Id))]
+
+
+rs
+72
+9
+1
+rs :: [(Loc, (String, Id))]
+
+
+l
+72
+20
+1
+l :: Int
+
+
+s
+72
+24
+1
+s :: String
+
+
+x
+72
+27
+1
+x :: [Char]
+
+
+l
+72
+36
+1
+l :: Loc
+
+
+s
+72
+38
+1
+s :: String
+
+
+Haddock.Backends.Annot.getLocEs
+72
+44
+1
+getLocEs :: Data a => a -> [(HsExpr Id, Loc, String)]
+
+
+tcm
+72
+53
+1
+tcm :: a
+
+
+x
+72
+58
+1
+x :: Id
+
+
+typs
+72
+63
+1
+typs :: String -> [Id]
+
+
+s
+72
+68
+1
+s :: String
+
+
+ws
+73
+9
+1
+ws :: [(Loc, (String, Id))]
+
+
+l
+73
+20
+1
+l :: Int
+
+
+s
+73
+24
+1
+s :: String
+
+
+x
+73
+27
+1
+x :: [Char]
+
+
+s
+73
+34
+1
+s :: String
+
+
+x
+73
+38
+1
+x :: Id
+
+
+l
+73
+46
+1
+l :: Loc
+
+
+ns
+73
+53
+1
+ns :: [(String, (Id, Maybe Loc))]
+
+
+ns
+74
+9
+1
+ns :: [(String, (Id, Maybe Loc))]
+
+
+Haddock.Backends.Annot.getNames
+74
+18
+1
+getNames :: Data a => FilePath -> a -> [(String, (Id, Maybe Loc))]
+
+
+srcName
+74
+27
+1
+srcName :: FilePath
+
+
+tcm
+74
+35
+1
+tcm :: a
+
+
+tm
+75
+9
+1
+tm :: Map String (Id, Maybe Loc)
+
+
+Data.Map.fromList
+75
+18
+1
+fromList :: Ord k => [(k, a)] -> Map k a
+
+
+ns
+75
+29
+1
+ns :: [(String, (Id, Maybe Loc))]
+
+
+typs
+76
+9
+1
+typs :: String -> [Id]
+
+
+s
+76
+14
+1
+s :: String
+
+
+s
+76
+23
+1
+s :: String
+
+
+Data.Map.lookup
+76
+25
+1
+lookup :: Ord k => k -> Map k a -> Maybe a
+
+
+tm
+76
+36
+1
+tm :: Map String (Id, Maybe Loc)
+
+
+GHC.Types.[]
+77
+34
+1
+[] :: [a]
+
+
+x
+78
+26
+1
+x :: Id
+
+
+x
+78
+35
+1
+x :: [Char]
+
+
+Haddock.Backends.Annot.canonize
+81
+1
+1
+canonize :: (Ord b, Eq a) => [(b, (t, [a]))] -> [(b, (t, [a]))]
+
+
+anns
+81
+10
+1
+anns :: [(b, (t, [a]))]
+
+
+GHC.Base.map
+81
+17
+1
+map :: (a -> b) -> [a] -> [b]
+
+
+GHC.List.head
+81
+22
+1
+head :: [a] -> a
+
+
+GHC.Base..
+81
+27
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+Data.List.sortBy
+81
+29
+1
+sortBy :: (a -> a -> Ordering) -> [a] -> [a]
+
+
+cmp
+81
+38
+1
+cmp :: (b, (t, [a])) -> (b, (t, [a])) -> Ordering
+
+
+GHC.Base.$
+81
+43
+1
+($) :: (a -> b) -> a -> b
+
+
+GHC.Exts.groupWith
+81
+45
+1
+groupWith :: Ord b => (a -> b) -> [a] -> [[a]]
+
+
+Data.Tuple.fst
+81
+55
+1
+fst :: (a, b) -> a
+
+
+anns
+81
+59
+1
+anns :: [(Loc, (String, String))]
+
+
+cmp
+82
+9
+1
+cmp :: (b, (t, [a])) -> (b, (t, [a])) -> Ordering
+
+
+x1
+82
+19
+1
+x1 :: [a]
+
+
+x2
+82
+30
+1
+x2 :: [a]
+
+
+x1
+83
+13
+1
+x1 :: [a]
+
+
+GHC.Classes.==
+83
+16
+1
+(==) :: Eq a => a -> a -> Bool
+
+
+x2
+83
+19
+1
+x2 :: [a]
+
+
+GHC.Ordering.EQ
+83
+37
+1
+EQ :: Ordering
+
+
+GHC.List.length
+84
+13
+1
+length :: [a] -> Int
+
+
+x1
+84
+20
+1
+x1 :: [a]
+
+
+GHC.Classes.<
+84
+23
+1
+(<) :: Ord a => a -> a -> Bool
+
+
+GHC.List.length
+84
+25
+1
+length :: [a] -> Int
+
+
+x2
+84
+32
+1
+x2 :: [a]
+
+
+GHC.Ordering.GT
+84
+37
+1
+GT :: Ordering
+
+
+GHC.Base.otherwise
+85
+13
+1
+otherwise :: Bool
+
+
+GHC.Ordering.LT
+85
+37
+1
+LT :: Ordering
+
+
+Haddock.Backends.Annot.getLocEs
+88
+1
+1
+getLocEs :: Data a => a -> [(HsExpr Id, Loc, String)]
+
+
+z
+88
+10
+1
+z :: a
+
+
+e
+88
+16
+1
+e :: HsExpr Id
+
+
+Haddock.Backends.Annot.spLoc
+88
+19
+1
+spLoc :: SrcSpan -> Loc
+
+
+l
+88
+25
+1
+l :: Int
+
+
+stripParens
+88
+28
+1
+stripParens :: [Char] -> [Char]
+
+
+GHC.Base.$
+88
+40
+1
+($) :: (a -> b) -> a -> b
+
+
+Outputable.showPpr
+88
+42
+1
+showPpr :: Outputable a => a -> String
+
+
+e
+88
+50
+1
+e :: HsExpr Id
+
+
+l
+88
+57
+1
+l :: SrcSpan
+
+
+e
+88
+59
+1
+e :: HsExpr Id
+
+
+Haddock.Backends.Annot.findLEs
+88
+64
+1
+findLEs :: Data a => a -> [LHsExpr Id]
+
+
+z
+88
+72
+1
+z :: a
+
+
+stripParens
+89
+9
+1
+stripParens :: [Char] -> [Char]
+
+
+s
+89
+26
+1
+s :: [Char]
+
+
+stripParens
+89
+32
+1
+stripParens :: [Char] -> [Char]
+
+
+s
+89
+44
+1
+s :: String
+
+
+s
+90
+21
+1
+s :: [Char]
+
+
+stripRParens
+90
+32
+1
+stripRParens :: [Char] -> [Char]
+
+
+GHC.List.reverse
+90
+46
+1
+reverse :: [a] -> [a]
+
+
+s
+90
+54
+1
+s :: String
+
+
+stripRParens
+91
+9
+1
+stripRParens :: [Char] -> [Char]
+
+
+s
+91
+27
+1
+s :: [Char]
+
+
+stripRParens
+91
+32
+1
+stripRParens :: [Char] -> [Char]
+
+
+s
+91
+45
+1
+s :: String
+
+
+s
+92
+22
+1
+s :: [Char]
+
+
+GHC.List.reverse
+92
+32
+1
+reverse :: [a] -> [a]
+
+
+s
+92
+40
+1
+s :: String
+
+
+Haddock.Backends.Annot.getNames
+95
+1
+1
+getNames :: Data a => FilePath -> a -> [(String, (Id, Maybe Loc))]
+
+
+srcName
+95
+10
+1
+srcName :: FilePath
+
+
+z
+95
+18
+1
+z :: a
+
+
+Outputable.showPpr
+95
+24
+1
+showPpr :: Outputable a => a -> String
+
+
+x
+95
+32
+1
+x :: [Char]
+
+
+x
+95
+36
+1
+x :: [Char]
+
+
+Haddock.Backends.Annot.idLoc
+95
+39
+1
+idLoc :: FilePath -> Id -> Maybe Loc
+
+
+srcName
+95
+45
+1
+srcName :: FilePath
+
+
+x
+95
+53
+1
+x :: [Char]
+
+
+x
+95
+59
+1
+x :: Id
+
+
+Haddock.Backends.Annot.findIds
+95
+64
+1
+findIds :: Data a => a -> [Id]
+
+
+z
+95
+72
+1
+z :: a
+
+
+idOk
+95
+75
+1
+idOk :: Id -> Bool
+
+
+x
+95
+80
+1
+x :: [Char]
+
+
+idOk
+96
+9
+1
+idOk :: Id -> Bool
+
+
+GHC.Classes.not
+96
+16
+1
+not :: Bool -> Bool
+
+
+GHC.Base..
+96
+20
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+Id.isDictId
+96
+22
+1
+isDictId :: Id -> Bool
+
+
+Haddock.Backends.Annot.renderId
+99
+1
+1
+renderId :: Id -> String
+
+
+Outputable.showSDocForUser
+99
+12
+1
+showSDocForUser :: PrintUnqualified -> SDoc -> String
+
+
+Outputable.neverQualify
+99
+28
+1
+neverQualify :: PrintUnqualified
+
+
+GHC.Base..
+99
+41
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+PprTyThing.pprTyThing
+99
+43
+1
+pprTyThing :: PrintExplicitForalls -> TyThing -> SDoc
+
+
+GHC.Bool.False
+99
+54
+1
+False :: Bool
+
+
+GHC.Base..
+99
+60
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+TypeRep.AnId
+99
+62
+1
+AnId :: Id -> TyThing
+
+
+Haddock.Backends.Annot.spLoc
+102
+1
+1
+spLoc :: SrcSpan -> Loc
+
+
+sp
+102
+7
+1
+sp :: SrcSpan
+
+
+Haddock.Backends.Annot.Loc
+102
+12
+1
+Loc :: (Int, Int) -> Loc
+
+
+SrcLoc.srcSpanStartLine
+102
+17
+1
+srcSpanStartLine :: SrcSpan -> Int
+
+
+sp
+102
+34
+1
+sp :: SrcSpan
+
+
+SrcLoc.srcSpanStartCol
+102
+38
+1
+srcSpanStartCol :: SrcSpan -> Int
+
+
+sp
+102
+54
+1
+sp :: SrcSpan
+
+
+Haddock.Backends.Annot.idLoc
+105
+1
+1
+idLoc :: FilePath -> Id -> Maybe Loc
+
+
+srcName
+105
+7
+1
+srcName :: FilePath
+
+
+x
+105
+15
+1
+x :: Id
+
+
+GHC.Classes.not
+106
+5
+1
+not :: Bool -> Bool
+
+
+SrcLoc.isGoodSrcSpan
+106
+10
+1
+isGoodSrcSpan :: SrcSpan -> Bool
+
+
+sp
+106
+24
+1
+sp :: SrcSpan
+
+
+Data.Maybe.Nothing
+106
+30
+1
+Nothing :: Maybe a
+
+
+GHC.Classes.not
+107
+5
+1
+not :: Bool -> Bool
+
+
+thisFile
+107
+10
+1
+thisFile :: SrcSpan -> Bool
+
+
+sp
+107
+19
+1
+sp :: SrcSpan
+
+
+Data.Maybe.Nothing
+107
+30
+1
+Nothing :: Maybe a
+
+
+GHC.Base.otherwise
+108
+5
+1
+otherwise :: Bool
+
+
+Data.Maybe.Just
+108
+30
+1
+Just :: a -> Maybe a
+
+
+GHC.Base.$
+108
+35
+1
+($) :: (a -> b) -> a -> b
+
+
+Haddock.Backends.Annot.spLoc
+108
+37
+1
+spLoc :: SrcSpan -> Loc
+
+
+sp
+108
+43
+1
+sp :: SrcSpan
+
+
+sp
+109
+9
+1
+sp :: SrcSpan
+
+
+Name.nameSrcSpan
+109
+20
+1
+nameSrcSpan :: Name -> SrcSpan
+
+
+GHC.Base.$
+109
+32
+1
+($) :: (a -> b) -> a -> b
+
+
+Id.idName
+109
+34
+1
+idName :: Id -> Name
+
+
+x
+109
+41
+1
+x :: [Char]
+
+
+thisFile
+110
+9
+1
+thisFile :: SrcSpan -> Bool
+
+
+FastString.fsLit
+110
+21
+1
+fsLit :: String -> FastString
+
+
+srcName
+110
+27
+1
+srcName :: FilePath
+
+
+GHC.Classes.==
+110
+35
+1
+(==) :: Eq a => a -> a -> Bool
+
+
+GHC.Base..
+110
+39
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+SrcLoc.srcSpanFile
+110
+41
+1
+srcSpanFile :: SrcSpan -> FastString
+
+
+Haddock.Backends.Annot.Guard
+118
+3
+1
+Guard :: Typeable a => Maybe a -> Guard
+
+
+Haddock.Backends.Annot.everythingButQ
+124
+1
+2
+everythingButQ ::
+  (r -> r -> r) -> [Guard] -> GenericQ r -> GenericQ r
+
+
+k
+124
+16
+1
+k :: r -> r -> r
+
+
+q
+124
+18
+1
+q :: [Guard]
+
+
+f
+124
+20
+1
+f :: Data a => a -> r
+
+
+x
+124
+22
+1
+x :: a
+
+
+GHC.List.foldl
+125
+5
+1
+foldl :: (a -> b -> a) -> a -> [b] -> a
+
+
+k
+125
+11
+1
+k :: r -> r -> r
+
+
+f
+125
+14
+1
+f :: Data a => a -> r
+
+
+x
+125
+16
+1
+x :: [Char]
+
+
+fsp
+125
+19
+1
+fsp :: [r]
+
+
+fsp
+126
+11
+1
+fsp :: [r]
+
+
+Haddock.Backends.Annot.isPost
+126
+22
+1
+isPost :: Typeable a => a -> [Guard] -> Bool
+
+
+x
+126
+29
+1
+x :: [Char]
+
+
+q
+126
+31
+1
+q :: [Guard]
+
+
+GHC.Types.[]
+127
+28
+1
+[] :: [a]
+
+
+Data.Data.gmapQ
+128
+28
+2
+gmapQ ::
+  Data a => forall u. (forall d. Data d => d -> u) -> a -> [u]
+
+
+Haddock.Backends.Annot.everythingButQ
+128
+35
+2
+everythingButQ ::
+  (r -> r -> r) -> [Guard] -> GenericQ r -> GenericQ r
+
+
+k
+128
+50
+1
+k :: r -> r -> r
+
+
+q
+128
+52
+1
+q :: [Guard]
+
+
+f
+128
+54
+1
+f :: Data a => a -> r
+
+
+x
+128
+57
+1
+x :: [Char]
+
+
+Haddock.Backends.Annot.isPost
+131
+1
+1
+isPost :: Typeable a => a -> [Guard] -> Bool
+
+
+a
+131
+8
+1
+a :: a
+
+
+GHC.List.or
+131
+12
+1
+or :: [Bool] -> Bool
+
+
+GHC.Base..
+131
+15
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+GHC.Base.map
+131
+17
+1
+map :: (a -> b) -> [a] -> [b]
+
+
+check
+131
+21
+1
+check :: Guard -> Bool
+
+
+check
+133
+9
+1
+check :: Guard -> Bool
+
+
+x
+133
+15
+1
+x :: Guard
+
+
+x
+133
+24
+1
+x :: [Char]
+
+
+y
+134
+27
+1
+y :: Maybe a
+
+
+Data.Maybe.isJust
+134
+32
+1
+isJust :: Maybe a -> Bool
+
+
+GHC.Base.$
+134
+39
+1
+($) :: (a -> b) -> a -> b
+
+
+Data.Typeable.cast
+134
+42
+1
+cast :: (Typeable a, Typeable b) => a -> Maybe b
+
+
+a
+134
+47
+1
+a :: Int
+
+
+GHC.Base.asTypeOf
+134
+50
+1
+asTypeOf :: a -> a -> a
+
+
+y
+134
+61
+1
+y :: Maybe a
+
+
+Haddock.Backends.Annot.listifyBut
+138
+1
+1
+listifyBut :: Typeable r => (r -> Bool) -> [Guard] -> GenericQ [r]
+
+
+p
+138
+12
+1
+p :: r -> Bool
+
+
+q
+138
+14
+1
+q :: [Guard]
+
+
+Haddock.Backends.Annot.everythingButQ
+139
+5
+2
+everythingButQ ::
+  (r -> r -> r) -> [Guard] -> GenericQ r -> GenericQ r
+
+
+GHC.Base.++
+139
+20
+1
+(++) :: [a] -> [a] -> [a]
+
+
+q
+139
+25
+1
+q :: [Guard]
+
+
+GHC.Types.[]
+139
+28
+1
+[] :: [a]
+
+
+Data.Generics.Aliases.mkQ
+139
+31
+1
+mkQ :: (Typeable a, Typeable b) => r -> (b -> r) -> a -> r
+
+
+x
+139
+39
+1
+x :: r
+
+
+p
+139
+47
+1
+p :: r -> Bool
+
+
+x
+139
+49
+1
+x :: [Char]
+
+
+x
+139
+57
+1
+x :: [Char]
+
+
+GHC.Types.[]
+139
+65
+1
+[] :: [a]
+
+
+Haddock.Backends.Annot.skipGuards
+142
+1
+1
+skipGuards :: [Guard]
+
+
+Haddock.Backends.Annot.Guard
+142
+16
+1
+Guard :: Typeable a => Maybe a -> Guard
+
+
+GHC.Err.undefined
+142
+23
+1
+undefined :: a
+
+
+Haddock.Backends.Annot.Guard
+143
+16
+1
+Guard :: Typeable a => Maybe a -> Guard
+
+
+GHC.Err.undefined
+143
+23
+1
+undefined :: a
+
+
+Haddock.Backends.Annot.findIds
+146
+1
+1
+findIds :: Data a => a -> [Id]
+
+
+a
+146
+9
+1
+a :: a
+
+
+Haddock.Backends.Annot.listifyBut
+146
+13
+1
+listifyBut :: Typeable r => (r -> Bool) -> [Guard] -> GenericQ [r]
+
+
+Var.isId
+146
+24
+1
+isId :: Var -> Bool
+
+
+Haddock.Backends.Annot.skipGuards
+146
+29
+1
+skipGuards :: [Guard]
+
+
+a
+146
+40
+1
+a :: Int
+
+
+Haddock.Backends.Annot.findLEs
+149
+1
+1
+findLEs :: Data a => a -> [LHsExpr Id]
+
+
+a
+149
+9
+1
+a :: a
+
+
+Haddock.Backends.Annot.listifyBut
+149
+13
+1
+listifyBut :: Typeable r => (r -> Bool) -> [Guard] -> GenericQ [r]
+
+
+SrcLoc.isGoodSrcSpan
+149
+25
+1
+isGoodSrcSpan :: SrcSpan -> Bool
+
+
+GHC.Base..
+149
+39
+1
+(.) :: (b -> c) -> (a -> b) -> a -> c
+
+
+SrcLoc.getLoc
+149
+41
+1
+getLoc :: Located e -> SrcSpan
+
+
+Haddock.Backends.Annot.skipGuards
+149
+49
+1
+skipGuards :: [Guard]
+
+
+a
+149
+60
+1
+a :: Int
+
+

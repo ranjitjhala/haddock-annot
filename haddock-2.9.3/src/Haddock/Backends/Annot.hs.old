@@ -1,0 +1,150 @@
+{-# LANGUAGE NoMonomorphismRestriction, DeriveDataTypeable, RankNTypes, GADTs, TupleSections  #-}
+
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.Backends.Annot
+-- Copyright   :  (c) Ranjit Jhala
+-- License     :  BSD-like
+--
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
+--
+-- Write out HsColour compatible type annotations
+-----------------------------------------------------------------------------
+
+module Haddock.Backends.Annot ( 
+    ppAnnot
+  ) where
+
+import GHC              
+import GHC.Exts         (groupWith)
+import Outputable
+import Var              (isId)
+import Id               (idName, isDictId)
+import NameSet          (NameSet)
+import FastString       (fsLit)
+import PprTyThing 
+import System.Directory (copyFile) 
+import System.FilePath  (addExtension)
+import qualified Data.Map as M
+import qualified Data.List as L
+import Data.Maybe (isJust)
+import Data.Data
+import Data.Generics.Aliases hiding (GT)
+import Haddock.Types
+
+ppAnnot :: [Interface] -> IO ()
+ppAnnot ifaces 
+  = mapM_ render ifaces
+
+render :: Interface -> IO ()
+render iface 
+  = do putStrLn $ "Render Annot: src = " ++ srcName ++ " dest = " ++ annName 
+       copyFile srcName annName
+       appendFile annName annots
+    where srcName = ifaceOrigFilename iface
+          annName = srcName `addExtension` "annot"
+          annots  = show $ getAnnMap srcName $ ifaceTcSource iface 
+
+newtype AnnMap = Ann (M.Map Loc (String, String))                    
+--newtype Loc    = Loc (Int, Int) deriving (Eq, Ord, Show)
+
+instance Show AnnMap where
+  show (Ann m) = "\n\n" ++ breakS ++ "\n\n" ++ (concatMap ppAnn $ M.toList m)
+    where ppAnn (Loc (l, c), (x,s)) =  x ++ "\n" 
+                                    ++ show l ++ "\n"
+                                    ++ show c ++ "\n"
+                                      ++ show (length $ lines s) ++ "\n"
+                                      ++ s ++ "\n\n\n"
+breakS :: String
+breakS = "MOUSEOVER ANNOTATIONS" 
+
+---------------------------------------------------------------------------
+-- Extract Annotations ----------------------------------------------------
+---------------------------------------------------------------------------
+
+traceShow :: (Show a) => String -> a -> a
+traceShow s x = trace ("Trace: " ++ s ++ " : " ++ show x) $ x
+
+getAnnMap ::  Data a => FilePath -> a -> AnnMap
+getAnnMap srcName tcm  = Ann $ M.fromList $ canonize $ anns
+  where anns   = [(l, (s, renderId x)) | (l, (s, x)) <- rs ++ ws ]
+        rs     = [(l, (s, x)) | (_,l,s) <- getLocEs tcm, x <- typs s]
+        ws     = [(l, (s, x)) | (s, (x, Just l)) <- ns]
+        ns     = getNames srcName tcm
+        tm     = M.fromList ns
+        typs s = case s `M.lookup` tm of 
+                   Nothing    -> []
+                   Just (x,_) -> [x]
+
+canonize :: (Ord b, Eq a) => [(b, (t, [a]))] -> [(b, (t, [a]))]
+canonize anns = map (head . L.sortBy cmp) $ groupWith fst anns
+  where cmp (_,(_,x1)) (_,(_,x2))
+          | x1 == x2              = EQ
+          | length x1 < length x2 = GT
+          | otherwise             = LT
+
+getLocEs ::  (Data a) => a -> [(HsExpr Id, Loc, String)]
+getLocEs z = [(e, spLoc l, stripParens $ showPpr e) | L l e <- findLEs z]
+  where stripParens ('(':s)  = stripParens s
+        stripParens s        = stripRParens (reverse s)
+        stripRParens (')':s) = stripRParens s
+        stripRParens s       = reverse s
+
+getNames ::  (Data a) => FilePath -> a -> [(String, (Id, Maybe Loc))]
+getNames srcName z = [(showPpr x, (x, idLoc srcName x)) | x <- findIds z, idOk x ]
+  where idOk = not . isDictId 
+
+renderId :: Id -> String
+renderId = showSDocForUser neverQualify . pprTyThing False . AnId
+
+spLoc :: SrcSpan -> Loc
+spLoc sp = Loc (srcSpanStartLine sp, srcSpanStartCol sp)
+
+idLoc :: FilePath -> Id -> Maybe Loc
+idLoc srcName x 
+  | not (isGoodSrcSpan sp) = Nothing 
+  | not (thisFile sp)      = Nothing 
+  | otherwise              = Just $ spLoc sp
+  where sp       = nameSrcSpan $ idName x
+        thisFile = (fsLit srcName ==) . srcSpanFile 
+
+---------------------------------------------------------------------------
+-- Visiting and Extracting Identifiers ------------------------------------
+-- From Tamar Christina: http://mistuke.wordpress.com/category/vsx --------
+---------------------------------------------------------------------------
+
+data Guard where 
+  Guard :: Typeable a => Maybe a -> Guard 
+  
+-- type HList = [Guard]
+
+-- | Summarise all nodes in top-down, left-to-right order 
+everythingButQ :: (r -> r -> r) -> [Guard] -> GenericQ r -> GenericQ r 
+everythingButQ k q f x 
+  = foldl k (f x) fsp 
+    where fsp = case isPost x q of 
+                  True  -> [] 
+                  False -> gmapQ (everythingButQ k q f) x
+
+isPost :: Typeable a => a -> [Guard] -> Bool 
+isPost a = or . map check 
+  where check :: Guard -> Bool 
+        check x = case x of 
+                    Guard y -> isJust $ (cast a) `asTypeOf` y
+
+-- | Get a list of all entities that meet a predicate 
+listifyBut :: Typeable r => (r -> Bool) -> [Guard] -> GenericQ [r] 
+listifyBut p q 
+  = everythingButQ (++) q ([] `mkQ` (\x -> if p x then [x] else []))
+
+skipGuards :: [Guard]
+skipGuards = [ Guard (undefined :: Maybe NameSet) 
+             , Guard (undefined :: Maybe PostTcKind)]
+
+findIds :: Data a => a -> [Id] 
+findIds a = listifyBut isId skipGuards a
+
+findLEs :: Data a => a -> [LHsExpr Id] 
+findLEs a = listifyBut (isGoodSrcSpan . getLoc) skipGuards a 
