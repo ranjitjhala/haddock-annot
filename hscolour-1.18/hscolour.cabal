@@ -1,0 +1,45 @@
+Name: hscolour
+Version: 1.18
+Copyright: 2003-2010 Malcolm Wallace, University of York; 2006 Bjorn Bringert
+Maintainer: Malcolm Wallace
+Author: Malcolm Wallace
+Homepage: http://www.cs.york.ac.uk/fp/darcs/hscolour/
+License: GPL
+License-file: LICENCE-GPL
+Build-depends:  base < 10, containers
+Extensions: 
+Synopsis: Colourise Haskell code.
+Description:
+  hscolour is a small Haskell script to colourise Haskell code. It currently
+  has six output formats: 
+  ANSI terminal codes,
+  HTML 3.2 with <font> tags,
+  HTML 4.01 with CSS,
+  HTML 4.01 with CSS and mouseover annotations,
+  XHTML 1.0 with inline CSS styling,
+  LaTeX,
+  and mIRC chat codes.
+Category: Language
+Exposed-Modules: 
+  Language.Haskell.HsColour
+  Language.Haskell.HsColour.ANSI
+  Language.Haskell.HsColour.Anchors
+  Language.Haskell.HsColour.ACSS
+  Language.Haskell.HsColour.CSS
+  Language.Haskell.HsColour.Classify
+  Language.Haskell.HsColour.ColourHighlight
+  Language.Haskell.HsColour.Colourise
+  Language.Haskell.HsColour.General
+  Language.Haskell.HsColour.HTML
+  Language.Haskell.HsColour.InlineCSS
+  Language.Haskell.HsColour.LaTeX
+  Language.Haskell.HsColour.MIRC
+  Language.Haskell.HsColour.Options
+  Language.Haskell.HsColour.Output
+  Language.Haskell.HsColour.TTY
+data-files: hscolour.css
+--ghc-options: -O -W
+Build-Type: Simple
+
+Executable: HsColour
+Main-is: HsColour.hs
