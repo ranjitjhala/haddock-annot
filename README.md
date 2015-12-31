@@ -1,13 +1,14 @@
 Modified version of Haddock/Cabal to generate HTML documentation with
 mouse-over types. See:
 
-    http://goto.ucsd.edu/~rjhala/Annot/
++ http://goto.ucsd.edu/~rjhala/Annot/
 
 or in particular,
 
-    http://goto.ucsd.edu/~rjhala/Annot/haddock/src/Haddock-Types.html#Interface
++ http://goto.ucsd.edu/~rjhala/Annot/Cabal/src/Distribution-Simple-Haddock.html#hscolour
++ http://goto.ucsd.edu/~rjhala/Annot/haddock/src/Haddock-Types.html#Interface
 
-for an example.
+for examples.
 
 Status
 ------
